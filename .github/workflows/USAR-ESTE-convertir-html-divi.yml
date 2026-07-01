@@ -1,0 +1,96 @@
+name: USAR ESTE - Convertir HTML a Divi
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_type:
+        description: "file o url"
+        required: true
+        default: "file"
+        type: choice
+        options:
+          - file
+          - url
+      source_value:
+        description: "Archivo del repo o URL. Ej: input/page.html"
+        required: true
+        default: "input/page.html"
+      divi_version:
+        description: "divi5 o divi4"
+        required: true
+        default: "divi5"
+        type: choice
+        options:
+          - divi5
+          - divi4
+
+permissions:
+  contents: read
+
+env:
+  PAGE2DIVI_RELEASE_REPO: remarkablepc/Page2Divi
+
+jobs:
+  convert:
+    name: Convertir con Page2Divi
+    runs-on: windows-latest
+
+    steps:
+      - name: Descargar repo
+        uses: actions/checkout@v4
+
+      - name: Descargar Page2Divi
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $headers = @{ "User-Agent" = "uptobe-htmltodivi-action" }
+          $release = Invoke-RestMethod -Headers $headers -Uri "https://api.github.com/repos/$env:PAGE2DIVI_RELEASE_REPO/releases/latest"
+          $asset = $release.assets | Where-Object { $_.name -match '\.zip$' -and $_.name -match '(?i)(win|windows)' } | Select-Object -First 1
+          if (-not $asset) {
+            Write-Host "Assets encontrados:"
+            $release.assets | ForEach-Object { Write-Host "- $($_.name)" }
+            throw "No se encontro ZIP Windows de Page2Divi."
+          }
+          Invoke-WebRequest -Headers $headers -Uri $asset.browser_download_url -OutFile "page2divi.zip"
+          Expand-Archive -Path "page2divi.zip" -DestinationPath "page2divi" -Force
+          $exe = Get-ChildItem -Path "page2divi" -Recurse -Filter "Page2Divi.exe" | Select-Object -First 1
+          if (-not $exe) { throw "No se encontro Page2Divi.exe dentro del ZIP." }
+          "PAGE2DIVI_EXE=$($exe.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Convertir
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Continue"
+          New-Item -ItemType Directory -Force -Path "resultado" | Out-Null
+          $sourceType = "${{ github.event.inputs.source_type }}"
+          $sourceValue = "${{ github.event.inputs.source_value }}"
+          $diviVersion = "${{ github.event.inputs.divi_version }}"
+          "source_type=$sourceType" | Out-File "resultado/diagnostico.txt"
+          "source_value=$sourceValue" | Out-File "resultado/diagnostico.txt" -Append
+          "divi_version=$diviVersion" | Out-File "resultado/diagnostico.txt" -Append
+          "workspace=$env:GITHUB_WORKSPACE" | Out-File "resultado/diagnostico.txt" -Append
+          if ($sourceType -eq "url") {
+            & "$env:PAGE2DIVI_EXE" --url "$sourceValue" --divi-version "$diviVersion" *> "resultado/page2divi-console.log"
+          } else {
+            $filePath = Join-Path $env:GITHUB_WORKSPACE $sourceValue
+            if (-not (Test-Path $filePath)) { throw "No existe el archivo: $filePath" }
+            & "$env:PAGE2DIVI_EXE" --file "$filePath" --divi-version "$diviVersion" *> "resultado/page2divi-console.log"
+          }
+          "exit_code=$LASTEXITCODE" | Out-File "resultado/diagnostico.txt" -Append
+          Get-ChildItem -Path $env:GITHUB_WORKSPACE -Recurse -File -ErrorAction SilentlyContinue | Select-Object FullName, Length | Out-File "resultado/files-found.txt"
+          $jsons = Get-ChildItem -Path $env:GITHUB_WORKSPACE -Recurse -File -Include *.json -ErrorAction SilentlyContinue
+          if ($jsons) {
+            New-Item -ItemType Directory -Force -Path "resultado/json" | Out-Null
+            foreach ($j in $jsons) { Copy-Item $j.FullName -Destination (Join-Path "resultado/json" $j.Name) -Force }
+          }
+          $outputs = Get-ChildItem -Path $env:GITHUB_WORKSPACE -Recurse -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq "output" }
+          foreach ($o in $outputs) { Copy-Item $o.FullName -Destination "resultado/output" -Recurse -Force -ErrorAction SilentlyContinue }
+
+      - name: Subir resultado SIEMPRE
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: resultado-page2divi
+          path: resultado/
+          if-no-files-found: warn
+          retention-days: 7
