@@ -16,7 +16,7 @@ on:
         required: true
         default: "input/page.html"
       divi_version:
-        description: "Versión Divi destino"
+        description: "Version Divi destino"
         required: true
         default: "divi5"
         type: choice
@@ -44,23 +44,20 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $headers = @{ "User-Agent" = "uptobe-htmltodivi-action" }
-          $releaseUrl = "https://api.github.com/repos/$env:PAGE2DIVI_RELEASE_REPO/releases/latest"
-          $release = Invoke-RestMethod -Headers $headers -Uri $releaseUrl
-
-          $assets = $release.assets | Where-Object { $_.name -match '\.zip$' }
-          $asset = $assets | Where-Object { $_.name -match '(?i)(win|windows)' } | Select-Object -First 1
+          $release = Invoke-RestMethod -Headers $headers -Uri "https://api.github.com/repos/$env:PAGE2DIVI_RELEASE_REPO/releases/latest"
+          $asset = $release.assets | Where-Object { $_.name -match '\.zip$' -and $_.name -match '(?i)(win|windows)' } | Select-Object -First 1
 
           if (-not $asset) {
             Write-Host "Assets encontrados:"
             $release.assets | ForEach-Object { Write-Host "- $($_.name)" }
-            throw "No se encontró ZIP de Windows en la última release."
+            throw "No se encontro ZIP de Windows en la ultima release."
           }
 
           Invoke-WebRequest -Headers $headers -Uri $asset.browser_download_url -OutFile "page2divi.zip"
           Expand-Archive -Path "page2divi.zip" -DestinationPath "page2divi" -Force
 
           $exe = Get-ChildItem -Path "page2divi" -Recurse -Filter "Page2Divi.exe" | Select-Object -First 1
-          if (-not $exe) { throw "No se encontró Page2Divi.exe dentro del ZIP." }
+          if (-not $exe) { throw "No se encontro Page2Divi.exe dentro del ZIP." }
 
           "PAGE2DIVI_EXE=$($exe.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
           & $exe.FullName --version
@@ -68,26 +65,53 @@ jobs:
       - name: Convertir a JSON Divi
         shell: pwsh
         run: |
-          $ErrorActionPreference = "Stop"
+          $ErrorActionPreference = "Continue"
+          New-Item -ItemType Directory -Force -Path "page2divi-result" | Out-Null
+
           $sourceType = "${{ github.event.inputs.source_type }}"
           $sourceValue = "${{ github.event.inputs.source_value }}"
           $diviVersion = "${{ github.event.inputs.divi_version }}"
 
+          "source_type=$sourceType" | Out-File "page2divi-result/diagnostico.txt"
+          "source_value=$sourceValue" | Out-File "page2divi-result/diagnostico.txt" -Append
+          "divi_version=$diviVersion" | Out-File "page2divi-result/diagnostico.txt" -Append
+          "workspace=$env:GITHUB_WORKSPACE" | Out-File "page2divi-result/diagnostico.txt" -Append
+
           if ($sourceType -eq "url") {
-            & "$env:PAGE2DIVI_EXE" --url "$sourceValue" --divi-version "$diviVersion"
+            & "$env:PAGE2DIVI_EXE" --url "$sourceValue" --divi-version "$diviVersion" *> "page2divi-result/page2divi-console.log"
           } else {
             $filePath = Join-Path $env:GITHUB_WORKSPACE $sourceValue
             if (-not (Test-Path $filePath)) { throw "No existe el archivo: $filePath" }
-            & "$env:PAGE2DIVI_EXE" --file "$filePath" --divi-version "$diviVersion"
+            & "$env:PAGE2DIVI_EXE" --file "$filePath" --divi-version "$diviVersion" *> "page2divi-result/page2divi-console.log"
           }
 
-          Write-Host "Archivos generados:"
-          Get-ChildItem -Path "output" -Recurse -ErrorAction SilentlyContinue | Select-Object FullName, Length | Format-Table -AutoSize
+          "exit_code=$LASTEXITCODE" | Out-File "page2divi-result/diagnostico.txt" -Append
+
+          $allFiles = Get-ChildItem -Path $env:GITHUB_WORKSPACE -Recurse -File -ErrorAction SilentlyContinue
+          $allFiles | Select-Object FullName, Length | Out-File "page2divi-result/files-found.txt"
+
+          $jsons = $allFiles | Where-Object { $_.Name -eq "page.json" -or $_.Extension -eq ".json" }
+          if ($jsons) {
+            New-Item -ItemType Directory -Force -Path "page2divi-result/json" | Out-Null
+            foreach ($j in $jsons) {
+              Copy-Item $j.FullName -Destination (Join-Path "page2divi-result/json" $j.Name) -Force
+            }
+          }
+
+          $outputDirs = Get-ChildItem -Path $env:GITHUB_WORKSPACE -Recurse -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq "output" }
+          foreach ($dir in $outputDirs) {
+            Copy-Item $dir.FullName -Destination "page2divi-result/output" -Recurse -Force -ErrorAction SilentlyContinue
+          }
+
+          if (-not (Get-ChildItem -Path "page2divi-result" -Recurse -Filter "page.json" -ErrorAction SilentlyContinue)) {
+            Write-Host "No se encontro page.json. Revisa page2divi-console.log y files-found.txt en el artefacto."
+          }
 
       - name: Subir resultado descargable
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: page2divi-output
-          path: output/
-          if-no-files-found: error
+          path: page2divi-result/
+          if-no-files-found: warn
           retention-days: 7
