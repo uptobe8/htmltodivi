@@ -1,0 +1,62 @@
+name: AUTO InkLab ZIP a Divi
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'input/**'
+      - '.github/workflows/AUTO-INLAB-ZIP.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  convert:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Preparar
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path resultado | Out-Null
+          "source=input/InkLab-web.zip" | Out-File resultado/diagnostico.txt
+          "divi=divi5" | Out-File resultado/diagnostico.txt -Append
+
+      - name: Descargar Page2Divi
+        shell: pwsh
+        run: |
+          $headers = @{ "User-Agent" = "uptobe-htmltodivi" }
+          $release = Invoke-RestMethod -Headers $headers -Uri "https://api.github.com/repos/remarkablepc/Page2Divi/releases/latest"
+          $asset = $release.assets | Where-Object { $_.name -like "*Win*zip" -or $_.name -like "*Windows*zip" } | Select-Object -First 1
+          if (-not $asset) { $release.assets | ForEach-Object { Write-Host $_.name }; exit 1 }
+          Invoke-WebRequest -Headers $headers -Uri $asset.browser_download_url -OutFile page2divi.zip
+          Expand-Archive page2divi.zip -DestinationPath page2divi -Force
+          $exe = Get-ChildItem page2divi -Recurse -Filter Page2Divi.exe | Select-Object -First 1
+          if (-not $exe) { exit 1 }
+          "$($exe.FullName)" | Out-File resultado/exe-path.txt
+          "PAGE2DIVI_EXE=$($exe.FullName)" | Out-File $env:GITHUB_ENV -Append
+
+      - name: Convertir InkLab
+        shell: pwsh
+        run: |
+          $file = Join-Path $env:GITHUB_WORKSPACE "input/InkLab-web.zip"
+          if (-not (Test-Path $file)) { "NO EXISTE $file" | Out-File resultado/error.txt; exit 1 }
+          & "$env:PAGE2DIVI_EXE" --file "$file" --divi-version divi5 *> resultado/page2divi-console.log
+          "exit_code=$LASTEXITCODE" | Out-File resultado/diagnostico.txt -Append
+          Get-ChildItem $env:GITHUB_WORKSPACE -Recurse -File | Select-Object FullName, Length | Out-File resultado/files-found.txt
+          $jsons = Get-ChildItem $env:GITHUB_WORKSPACE -Recurse -File -Filter *.json | Where-Object { $_.FullName -notlike "*page2divi*" }
+          New-Item -ItemType Directory -Force -Path resultado/json | Out-Null
+          foreach ($j in $jsons) { Copy-Item $j.FullName resultado/json/ -Force }
+          $outs = Get-ChildItem $env:GITHUB_WORKSPACE -Recurse -Directory | Where-Object { $_.Name -eq "output" }
+          foreach ($o in $outs) { Copy-Item $o.FullName resultado/output -Recurse -Force -ErrorAction SilentlyContinue }
+
+      - name: Subir resultado
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: resultado-page2divi-inklab
+          path: resultado/
+          if-no-files-found: warn
+          retention-days: 7
